@@ -25,18 +25,42 @@ pip install -r requirements.txt
 
 1. Go to https://api-console.zoho.in/ (use .com/.eu based on your region)
 2. Create a **Self Client** or **Server-based** app
-3. Generate an authorization code with scope: `ZohoMail.messages.READ`
-4. Run `python Api.py` with your fresh code to get a refresh token
-5. Note down: `CLIENT_ID`, `CLIENT_SECRET`, `REFRESH_TOKEN`
+3. Note down your `CLIENT_ID` and `CLIENT_SECRET` from the app settings
+4. Generate an **authorization code** with scope: `ZohoMail.messages.READ`
 
-### 5. Set environment variables
+### 5. Generate a refresh token
+
+Run this in PowerShell (replace the placeholders with your actual values):
+
+```powershell
+curl.exe -X POST "https://accounts.zoho.in/oauth/v2/token" -d "grant_type=authorization_code" -d "code=PASTE_FRESH_CODE_HERE" -d "client_id=PASTE_CLIENT_ID_HERE" -d "client_secret=PASTE_CLIENT_SECRET_HERE"
+```
+
+> Use `zoho.in` for India, `zoho.com` for US, `zoho.eu` for EU, `zoho.com.au` for Australia.
+
+The response will look like:
+
+```json
+{
+  "access_token": "...",
+  "refresh_token": "1000.xxxxxxx.xxxxxxx",
+  "token_type": "Bearer",
+  "expires_in": 3600
+}
+```
+
+Copy the `refresh_token` — you'll need it in the next step.
+
+> **Note:** The authorization code expires quickly. If you get `invalid_code`, generate a fresh one and retry immediately.
+
+### 6. Set environment variables
 
 Open PowerShell and run:
 
 ```powershell
 $env:ZOHO_CLIENT_ID="your_client_id"
 $env:ZOHO_CLIENT_SECRET="your_client_secret"
-$env:ZOHO_REFRESH_TOKEN="your_refresh_token"
+$env:ZOHO_REFRESH_TOKEN="the_refresh_token_from_step_5"
 $env:ZOHO_REGION="in"
 ```
 
