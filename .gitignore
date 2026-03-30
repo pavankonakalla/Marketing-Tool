@@ -1,0 +1,8 @@
+vectors/
+__pycache__/
+*.pyc
+.env
+*.env
+.venv/
+venv/
+env/
