@@ -1,20 +1,22 @@
 """
 generate_op.py — Streamlit app
-Upload a ZIP of resumes organised by tech-stack folders
-→ match each resume against saved job-email vectors
-→ download one Excel file with a sheet per tech stack.
+Tab 1: Upload a ZIP of resumes → match against job-email vectors → download Excel.
+Tab 2: Paste a job requirement → find matching LinkedIn profiles via Google.
 """
 
 import json
 import logging
 import re
 import tempfile
+import time
 import zipfile
 from io import BytesIO
 from pathlib import Path
+from urllib.parse import quote_plus
 
 import numpy as np
 import streamlit as st
+from googlesearch import search as google_search
 from sentence_transformers import SentenceTransformer
 
 logging.basicConfig(
@@ -42,7 +44,8 @@ TECH_SKILLS = {
     "html", "css", "sass", "tailwind", "bootstrap",
     "rest", "restful", "graphql", "grpc", "soap", "api",
     "kafka", "rabbitmq", "sqs", "sns", "activemq", "celery",
-    "spark", "hadoop", "airflow", "databricks", "etl", "data pipeline",
+    "spark", "pyspark", "hadoop", "airflow", "databricks", "delta lake",
+    "dbt", "etl", "elt", "data pipeline", "data engineering",
     "pandas", "numpy", "scikit-learn", "tensorflow", "pytorch", "keras",
     "machine learning", "deep learning", "nlp", "computer vision", "llm",
     "tableau", "power bi", "looker", "grafana",
@@ -55,6 +58,9 @@ TECH_SKILLS = {
     "salesforce", "sap", "servicenow", "pega", "appian",
     "splunk", "datadog", "new relic", "prometheus", "elk",
     "figma", "sketch",
+    "azure devops", "azure data factory", "adls", "glue", "step functions",
+    "unity catalog", "medallion", "star schema", "snowflake schema",
+    "servicenow", "informatica", "talend", "nifi", "fivetran",
 }
 
 
@@ -323,9 +329,124 @@ def load_model():
     return SentenceTransformer(EMBED_MODEL_NAME)
 
 
-def main():
-    st.set_page_config(page_title="Job Matcher", page_icon="📄", layout="wide")
-    st.title("Resume ↔ Job Email Matcher")
+# ---------------------------------------------------------------------------
+# LinkedIn profile search via Google
+# ---------------------------------------------------------------------------
+
+def build_linkedin_queries(role: str, skills: list[str], location: str) -> list[str]:
+    """Build multiple Google queries from broad to narrow for better results."""
+    queries = []
+
+    # Query 1: role + top 3 skills
+    q1_parts = ['site:linkedin.com/in']
+    if role:
+        q1_parts.append(f'"{role}"')
+    for skill in skills[:3]:
+        q1_parts.append(f'"{skill}"')
+    if location and location.lower() != "remote":
+        q1_parts.append(f'"{location}"')
+    queries.append(" ".join(q1_parts))
+
+    # Query 2: role + top 2 skills (broader)
+    q2_parts = ['site:linkedin.com/in']
+    if role:
+        q2_parts.append(f'"{role}"')
+    for skill in skills[:2]:
+        q2_parts.append(skill)
+    queries.append(" ".join(q2_parts))
+
+    # Query 3: just role + unquoted skills (broadest)
+    q3_parts = ['site:linkedin.com/in', role] + skills[:4]
+    queries.append(" ".join(q3_parts))
+
+    return queries
+
+
+def parse_requirement(text: str) -> dict:
+    """Extract role, skills, and location from pasted requirement text."""
+    text_lower = text.lower()
+    found_skills = []
+    for skill in TECH_SKILLS:
+        if re.search(rf"\b{re.escape(skill)}\b", text_lower):
+            found_skills.append(skill)
+
+    role = ""
+    role_patterns = [
+        r"(?:job\s*title|role|title|position)\s*[:;-]\s*(.+?)(?:\n|$)",
+        r"(?:looking for|hiring|need|seeking)\s+(?:a|an)?\s*(.+?)(?:\.|,|\n|$)",
+    ]
+    for pat in role_patterns:
+        m = re.search(pat, text, re.IGNORECASE)
+        if m:
+            role = m.group(1).strip()[:80]
+            break
+
+    location = ""
+    loc_match = re.search(
+        r"(?:location|loc|city)\s*[:;-]\s*(.+?)(?:\n|$)", text, re.IGNORECASE
+    )
+    if loc_match:
+        location = loc_match.group(1).strip()
+
+    return {"role": role, "skills": found_skills, "location": location}
+
+
+def search_linkedin_profiles(queries: list[str], num_results: int = 15) -> tuple[list[dict], str]:
+    """Try multiple queries from narrow to broad until we get results."""
+    seen_urls = set()
+    results = []
+    used_query = ""
+
+    for query in queries:
+        log.info("Trying Google query: %s", query)
+        used_query = query
+        try:
+            for url in google_search(query, num_results=num_results, lang="en"):
+                if "linkedin.com/in/" not in url:
+                    continue
+                if url in seen_urls:
+                    continue
+                seen_urls.add(url)
+                name_part = url.rstrip("/").split("/in/")[-1].split("?")[0]
+                display_name = name_part.replace("-", " ").title()
+                results.append({"name": display_name, "url": url})
+                time.sleep(0.3)
+        except Exception as e:
+            log.warning("Google search error for query '%s': %s", query, e)
+
+        if results:
+            break
+        log.info("No results, trying broader query...")
+        time.sleep(1)
+
+    return results, used_query
+
+
+def profiles_to_excel(profiles: list[dict], query: str) -> bytes:
+    import openpyxl
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "LinkedIn Profiles"
+    headers = ["#", "Name", "LinkedIn URL", "Search Query"]
+    ws.append(headers)
+    for col in range(1, len(headers) + 1):
+        ws.cell(row=1, column=col).font = openpyxl.styles.Font(bold=True)
+    for idx, p in enumerate(profiles, 1):
+        ws.append([idx, p["name"], p["url"], query if idx == 1 else ""])
+    for col in ws.columns:
+        max_len = max(len(str(cell.value or "")) for cell in col)
+        ws.column_dimensions[col[0].column_letter].width = min(max_len + 2, 60)
+    buf = BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# Streamlit UI
+# ---------------------------------------------------------------------------
+
+def tab_resume_matcher():
+    st.header("Resume ↔ Job Email Matcher")
     st.write(
         "Upload a **ZIP file** with folders named by tech stack "
         "(e.g. `Java/`, `Python/`, `.NET/`), each containing resumes (PDF/DOCX). "
@@ -343,7 +464,7 @@ def main():
             return
 
         for folder, resumes in folder_resumes.items():
-            st.success(f"📁 **{folder}** — {len(resumes)} resume(s): {', '.join(r[0] for r in resumes)}")
+            st.success(f"**{folder}** — {len(resumes)} resume(s): {', '.join(r[0] for r in resumes)}")
 
         records = load_all_vectors()
         if not records:
@@ -372,7 +493,7 @@ def main():
             matched = match_resumes_to_jobs(resume_data, records)
             all_results[folder] = matched
 
-            st.subheader(f"📁 {folder} — Top 10 matches")
+            st.subheader(f"{folder} — Top 10 matches")
             preview = []
             for r in matched[:10]:
                 preview.append({
@@ -397,6 +518,82 @@ def main():
             file_name="job_matches.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
+
+
+def tab_linkedin_search():
+    st.header("LinkedIn Profile Finder")
+    st.write("Paste a job requirement below and find matching LinkedIn profiles via Google search.")
+
+    requirement = st.text_area(
+        "Paste job requirement here",
+        height=200,
+        placeholder="e.g. Looking for a Java Spring Boot Developer with 5+ years experience in microservices, AWS, Kafka. Location: Charlotte, NC",
+    )
+
+    col1, col2 = st.columns(2)
+    with col1:
+        num_results = st.slider("Number of profiles to find", min_value=5, max_value=30, value=15)
+    with col2:
+        custom_location = st.text_input("Override location (optional)", "")
+
+    if st.button("Search LinkedIn Profiles", type="primary"):
+        if not requirement.strip():
+            st.warning("Please paste a job requirement first.")
+            return
+
+        with st.spinner("Analyzing requirement..."):
+            parsed = parse_requirement(requirement)
+
+        if custom_location:
+            parsed["location"] = custom_location
+
+        st.subheader("Extracted from requirement")
+        st.write(f"**Role:** {parsed['role'] or 'Not detected'}")
+        st.write(f"**Skills:** {', '.join(parsed['skills']) or 'None detected'}")
+        st.write(f"**Location:** {parsed['location'] or 'Not specified'}")
+
+        queries = build_linkedin_queries(parsed["role"], parsed["skills"], parsed["location"])
+        st.code(queries[0], language="text")
+
+        # Always show a manual Google link as fallback
+        manual_url = f"https://www.google.com/search?q={quote_plus(queries[0])}"
+        st.markdown(f"[Open this search in Google manually]({manual_url})")
+
+        with st.spinner("Searching Google for LinkedIn profiles (this may take 15-30 seconds)..."):
+            profiles, used_query = search_linkedin_profiles(queries, num_results=num_results)
+
+        if not profiles:
+            st.warning(
+                "No profiles found via automated search. Google may be rate-limiting. "
+                "Use the manual Google link above to search directly."
+            )
+            return
+
+        st.success(f"Found {len(profiles)} LinkedIn profile(s) using: `{used_query}`")
+
+        for i, p in enumerate(profiles, 1):
+            st.markdown(f"**{i}. [{p['name']}]({p['url']})**")
+
+        excel_bytes = profiles_to_excel(profiles, used_query)
+        st.download_button(
+            label="Download Profiles (Excel)",
+            data=excel_bytes,
+            file_name="linkedin_profiles.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+
+def main():
+    st.set_page_config(page_title="Marketing Tool", page_icon="📄", layout="wide")
+    st.title("Marketing Tool")
+
+    tab1, tab2 = st.tabs(["Resume Matcher", "LinkedIn Profile Finder"])
+
+    with tab1:
+        tab_resume_matcher()
+
+    with tab2:
+        tab_linkedin_search()
 
 
 if __name__ == "__main__":
